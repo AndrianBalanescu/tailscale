@@ -919,6 +919,15 @@ func WriteHTTPError(w http.ResponseWriter, r *http.Request, e HTTPError) {
 	}
 }
 
+// HTTPStatuser is an optional interface implemented by errors that
+// carry an intended HTTP response. Handlers translating errors to
+// HTTP should honour the returned HTTPError rather than defaulting to
+// 500.
+type HTTPStatuser interface {
+	error
+	HTTPStatus() HTTPError
+}
+
 // HTTPError is an error with embedded HTTP response information.
 //
 // It is the error type to be (optionally) used by Handler.ServeHTTPReturn.

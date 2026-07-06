@@ -176,7 +176,7 @@ func getCertPEMHook(ctx context.Context, b *ipnlocal.LocalBackend, domain string
 	if err != nil {
 		if ae, ok := errors.AsType[*acme.Error](err); ok {
 			if d, ok := acme.RateLimit(ae); ok {
-				return nil, &ipnlocal.CertRateLimitedError{RetryAfter: d, Underlying: err}
+				return nil, &CertRateLimitedError{RetryAfter: d, Underlying: err}
 			}
 		}
 		return nil, err

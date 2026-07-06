@@ -8,12 +8,13 @@ package localapi
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"tailscale.com/ipn/ipnlocal"
+	"tailscale.com/tsweb"
 )
 
 func init() {
@@ -41,11 +42,10 @@ func (h *Handler) serveCert(w http.ResponseWriter, r *http.Request) {
 	}
 	pair, err := h.b.GetCertPEMWithValidity(r.Context(), domain, minValidity)
 	if err != nil {
-		if rl, ok := errors.AsType[*ipnlocal.CertRateLimitedError](err); ok {
-			if rl.RetryAfter > 0 {
-				w.Header().Set("Retry-After", strconv.Itoa(int(rl.RetryAfter.Seconds())))
-			}
-			http.Error(w, fmt.Sprint(err), http.StatusTooManyRequests)
+		if hs, ok := errors.AsType[tsweb.HTTPStatuser](err); ok {
+			resp := hs.HTTPStatus()
+			maps.Copy(w.Header(), resp.Header)
+			http.Error(w, resp.Msg, resp.Code)
 			return
 		}
 		// TODO(bradfitz): 500 is a little lazy here. The errors returned from
