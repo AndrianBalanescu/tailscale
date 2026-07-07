@@ -1213,6 +1213,83 @@ func TestQuad100UnservedTCPPortDoesNotForward(t *testing.T) {
 	}
 }
 
+// TestVIPServiceUnservedTCPPortDoesNotForward verifies that a TCP SYN to a VIP
+// service IP on a port the service does not serve is rejected by acceptTCP
+// rather than being redirected to 127.0.0.1:<port> on the underlying host.
+func TestVIPServiceUnservedTCPPortDoesNotForward(t *testing.T) {
+	serviceVIP := netip.MustParseAddr("100.90.1.2")
+	const serviceName = "svc:test"
+
+	impl := makeNetstack(t, func(impl *Impl) {
+		impl.ProcessSubnets = false
+		impl.ProcessLocalIPs = false
+		impl.atomicIsLocalIPFunc.Store(looksLikeATailscaleSelfAddress)
+		impl.atomicIsVIPServiceIPFunc.Store(func(addr netip.Addr) bool {
+			return addr == serviceVIP
+		})
+	})
+
+	// Mark the service as one this node hosts and is actively serving, so
+	// handleLocalPackets absorbs its traffic into netstack (rather than letting
+	// a non-hosted VIP route through). The service serves no TCP ports here, so
+	// every port is "non-served". AdvertiseServices flows through to
+	// UpdateActiveVIPServices, marking the service active.
+	prefs := ipn.NewPrefs()
+	prefs.AdvertiseServices = []string{serviceName}
+	if _, err := impl.lb.EditPrefs(&ipn.MaskedPrefs{
+		Prefs:                *prefs,
+		AdvertiseServicesSet: true,
+	}); err != nil {
+		t.Fatalf("EditPrefs: %v", err)
+	}
+	impl.lb.ForTest().SetIPServiceMappings(netmap.IPServiceMappings{serviceVIP: serviceName})
+
+	// Register the VIP on the NIC so gVisor routes it to acceptTCP.
+	protocolAddr := tcpip.ProtocolAddress{
+		Protocol:          header.IPv4ProtocolNumber,
+		AddressWithPrefix: tcpip.AddrFrom4(serviceVIP.As4()).WithPrefix(),
+	}
+	if err := impl.ipstack.AddProtocolAddress(nicID, protocolAddr, stack.AddressProperties{}); err != nil {
+		t.Fatalf("AddProtocolAddress: %v", err)
+	}
+
+	dialFn, gotConn := makeHangDialer(t)
+	impl.forwardDialFunc = dialFn
+
+	client := netip.MustParseAddr("100.101.102.103")
+	pkt := tcp4syn(t, client, serviceVIP, 1234, 8001) // 8001: a port the service doesn't serve
+	var parsed packet.Parsed
+	parsed.Decode(pkt)
+
+	resp, _ := impl.handleLocalPackets(&parsed, impl.tundev, nil)
+	if resp != filter.DropSilently {
+		t.Fatalf("handleLocalPackets for VIP:8001: got %v, want filter.DropSilently", resp)
+	}
+
+	inFlightZero := make(chan struct{})
+	go func() {
+		for {
+			impl.mu.Lock()
+			n := impl.connsInFlightByClient[client]
+			impl.mu.Unlock()
+			if n == 0 {
+				close(inFlightZero)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-gotConn:
+		t.Fatalf("forwardDialFunc was called for VIP-service:8001; acceptTCP fell through to forwardTCP instead of sending RST. A non-served port on a service IP is being redirected to the host's loopback at the same port.")
+	case <-inFlightZero:
+		// acceptTCP returned cleanly; the RST guard fired.
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for acceptTCP to dispatch VIP-service:8001 SYN")
+	}
+}
+
 func TestShouldSendToHost(t *testing.T) {
 	var (
 		selfIP4             = netip.MustParseAddr("100.64.1.2")
